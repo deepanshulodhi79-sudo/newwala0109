@@ -4,6 +4,7 @@ import nodemailer from 'nodemailer';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import crypto from 'crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -22,7 +23,7 @@ const activeSessions = {};
 const transporters = new Map();
 
 /* ==========================================================================
-   ROOT ROUTE (Fixes Page Load & 500 Vercel Open Bug)
+   ROOT ROUTE
    ========================================================================== */
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
@@ -53,7 +54,7 @@ async function verifyTurnstile(token, ip) {
 }
 
 /* ==========================================================================
-   TRANSPORTER POOLING (Socket Connection Reuse)
+   TRANSPORTER POOLING
    ========================================================================== */
 function getTransporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
@@ -64,8 +65,8 @@ function getTransporter(email, appPassword) {
       service: "gmail",
       auth: { user: cleanEmail, pass: appPassword },
       pool: true,
-      maxConnections: 2,
-      maxMessages: 50
+      maxConnections: 3,
+      maxMessages: 100
     });
     transporters.set(cacheKey, transporter);
   }
@@ -91,7 +92,7 @@ function parseSpintax(text) {
 }
 
 /* ==========================================================================
-   CLEAN PLAIN-TEXT FALLBACK (Dual Multipart MIME Support)
+   CLEAN PLAIN-TEXT FALLBACK
    ========================================================================== */
 function convertHtmlToText(html) {
   if (!html) return "";
@@ -144,7 +145,7 @@ app.post("/api/verify", async (req, res) => {
 });
 
 /* ==========================================================================
-   SSE STREAM ROUTE (SLOW HUMAN-LIKE PACING: 4-8 SECONDS DELAY)
+   SSE STREAM ROUTE (INBOX DELIVERABILITY OPTIMIZED)
    ========================================================================== */
 app.post("/api/send-stream", async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -171,6 +172,7 @@ app.post("/api/send-stream", async (req, res) => {
 
   const senderEmail = email.toLowerCase().trim();
   const cleanSenderName = (senderName || "").replace(/"/g, "").trim();
+  const domainName = senderEmail.split('@')[1] || 'gmail.com';
 
   activeSessions['global_stop'] = false;
 
@@ -183,7 +185,6 @@ app.post("/api/send-stream", async (req, res) => {
     const recipient = recipients[index] ? recipients[index].trim() : "";
     if (!recipient) continue;
 
-    // Send HTTP keep-alive ping during slow delays to prevent connection drops
     res.write(': keep-alive\n\n');
 
     try {
@@ -192,11 +193,20 @@ app.post("/api/send-stream", async (req, res) => {
       const spunBody = parseSpintax(messageBody);
       const isHtml = /<[a-z][\s\S]*>/i.test(spunBody);
 
-      // Clean, standard MIME structure without spammy custom headers
+      // Unique Message-ID generation to avoid spam triggers
+      const uniqueMsgId = `<${crypto.randomBytes(12).toString('hex')}@${domainName}>`;
+
       const mailOptions = {
         from: cleanSenderName ? `"${cleanSenderName}" <${senderEmail}>` : senderEmail,
         to: recipient,
-        subject: spunSubject
+        replyTo: senderEmail,
+        subject: spunSubject,
+        date: new Date(),
+        messageId: uniqueMsgId,
+        headers: {
+          'X-Mailer': 'Node.js Express App',
+          'Auto-Submitted': 'auto-generated'
+        }
       };
 
       if (isHtml) {
@@ -214,15 +224,19 @@ app.post("/api/send-stream", async (req, res) => {
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // ORGANIC PACING: Random delay between 2.0s and 4.0s to simulate natural sending
+    // SPEED UNCHANGED: Original timing logic (0.6s to 1.2s delay)
     if (index < recipients.length - 1) {
       const randomDelay = Math.floor(600 + Math.random() * 600);
-      
-      // Ping client every 2 seconds during the long wait to keep socket alive
       const delayIntervals = Math.floor(randomDelay / 2000);
+      
       for (let i = 0; i < delayIntervals; i++) {
         await new Promise(resolve => setTimeout(resolve, 2000));
         res.write(': keep-alive\n\n');
+      }
+      
+      const remainingDelay = randomDelay % 2000;
+      if (remainingDelay > 0) {
+        await new Promise(resolve => setTimeout(resolve, remainingDelay));
       }
     }
   }
