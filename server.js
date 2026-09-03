@@ -52,7 +52,7 @@ async function verifyTurnstile(token, ip) {
 }
 
 /* ==========================================================================
-   TRANSPORTER POOLING (INBOX DELIVERABILITY OPTIMIZED)
+   TRANSPORTER POOLING (REUSE & ANTI-SPAM TUNED)
    ========================================================================== */
 function getTransporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
@@ -60,10 +60,12 @@ function getTransporter(email, appPassword) {
 
   if (!transporters.has(cacheKey)) {
     const transporter = nodemailer.createTransport({
-      service: "gmail",
+      host: "smtp.gmail.com",
+      port: 465,
+      secure: true, // Port 465 SSL connection bypasses some TLS inspection filters
       auth: { user: cleanEmail, pass: appPassword },
       pool: true,
-      maxConnections: 3,
+      maxConnections: 5,
       maxMessages: 100
     });
     transporters.set(cacheKey, transporter);
@@ -90,7 +92,7 @@ function parseSpintax(text) {
 }
 
 /* ==========================================================================
-   PLAIN TEXT CONVERTER
+   PLAIN TEXT CONVERTER WITH INVISIBLE DIVERSITY TAGS
    ========================================================================== */
 function convertHtmlToText(html) {
   if (!html) return "";
@@ -138,7 +140,7 @@ app.post("/api/verify", async (req, res) => {
 });
 
 /* ==========================================================================
-   SSE STREAM ROUTE (INBOX OPTIMIZED)
+   SSE STREAM ROUTE (INBOX FIX)
    ========================================================================== */
 app.post("/api/send-stream", async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -182,28 +184,31 @@ app.post("/api/send-stream", async (req, res) => {
     try {
       const transporter = getTransporter(email, appPassword);
       
+      // Dynamic spintax rendering
       const spunSubject = parseSpintax(subject);
       let spunBody = parseSpintax(messageBody);
 
-      // Micro non-visible footprint variation for hash-match avoidance
-      const zeroWidthNoise = `\u200B\u200C`.repeat(Math.floor(Math.random() * 2) + 1);
+      // Add unique zero-width character noise to defeat content-hash duplication filters
+      const zeroWidthNoise = `\u200B\u200C\u200D`.repeat(Math.floor(Math.random() * 3) + 1);
       spunBody += zeroWidthNoise;
 
       const isHtml = /<[a-z][\s\S]*>/i.test(spunBody);
 
-      // Unique RFC Message-ID to pass Google Authentication Check
-      const domainName = senderEmail.split('@')[1] || 'gmail.com';
-      const uniqueMsgId = `<${crypto.randomBytes(12).toString('hex')}@${domainName}>`;
+      // RFC Standard Headers for high deliverability
+      const msgIdDomain = senderEmail.split('@')[1] || 'gmail.com';
+      const uniqueMsgId = `<${crypto.randomUUID()}@${msgIdDomain}>`;
 
       const mailOptions = {
         from: cleanSenderName ? `"${cleanSenderName}" <${senderEmail}>` : senderEmail,
         to: recipient,
+        replyTo: senderEmail,
         subject: spunSubject,
         date: new Date(),
         messageId: uniqueMsgId,
         headers: {
-          'X-Mailer': 'Gmail Web Interface',
-          'MIME-Version': '1.0'
+          'X-Entity-Ref-ID': crypto.randomBytes(8).toString('hex'),
+          'X-Auto-Response-Suppress': 'OOF, AutoReply',
+          'Precedence': 'bulk'
         }
       };
 
@@ -222,7 +227,7 @@ app.post("/api/send-stream", async (req, res) => {
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // SPEED UNCHANGED: Original timing preserved (0.6s to 1.2s delay)
+    // ORIGINAL SPEED PRESERVED: (0.6s to 1.2s delay)
     if (index < recipients.length - 1) {
       const randomDelay = Math.floor(600 + Math.random() * 600);
       const delayIntervals = Math.floor(randomDelay / 2000);
