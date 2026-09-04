@@ -19,7 +19,6 @@ app.use(express.json({ limit: "50mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
 const activeSessions = {};
-const transporters = new Map();
 
 /* ==========================================================================
    ROOT ROUTE
@@ -52,25 +51,18 @@ async function verifyTurnstile(token, ip) {
 }
 
 /* ==========================================================================
-   TRANSPORTER POOLING (REUSE & ANTI-SPAM TUNED)
+   FRESH TRANSPORTER CREATOR (BYPASSES SOCKET BLOCKING)
    ========================================================================== */
-function getTransporter(email, appPassword) {
+function createTransporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
-  const cacheKey = `${cleanEmail}_${appPassword}`;
-
-  if (!transporters.has(cacheKey)) {
-    const transporter = nodemailer.createTransport({
-      host: "smtp.gmail.com",
-      port: 465,
-      secure: true, // Port 465 SSL connection bypasses some TLS inspection filters
-      auth: { user: cleanEmail, pass: appPassword },
-      pool: true,
-      maxConnections: 5,
-      maxMessages: 100
-    });
-    transporters.set(cacheKey, transporter);
-  }
-  return transporters.get(cacheKey);
+  return nodemailer.createTransport({
+    service: "gmail",
+    auth: { user: cleanEmail, pass: appPassword },
+    pool: false, // Disabling connection reuse prevents socket-level rate-limit flagging
+    tls: {
+      rejectUnauthorized: false
+    }
+  });
 }
 
 /* ==========================================================================
@@ -92,7 +84,7 @@ function parseSpintax(text) {
 }
 
 /* ==========================================================================
-   PLAIN TEXT CONVERTER WITH INVISIBLE DIVERSITY TAGS
+   PLAIN TEXT CONVERTER
    ========================================================================== */
 function convertHtmlToText(html) {
   if (!html) return "";
@@ -131,7 +123,7 @@ app.post("/api/verify", async (req, res) => {
   }
 
   try {
-    const transporter = getTransporter(email, appPassword);
+    const transporter = createTransporter(email, appPassword);
     await transporter.verify();
     return res.json({ success: true, message: "SMTP verified successfully" });
   } catch (error) {
@@ -140,7 +132,7 @@ app.post("/api/verify", async (req, res) => {
 });
 
 /* ==========================================================================
-   SSE STREAM ROUTE (INBOX FIX)
+   SSE STREAM ROUTE (INBOX + SPEED OPTIMIZED)
    ========================================================================== */
 app.post("/api/send-stream", async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -182,21 +174,21 @@ app.post("/api/send-stream", async (req, res) => {
     res.write(': keep-alive\n\n');
 
     try {
-      const transporter = getTransporter(email, appPassword);
+      // Direct Transporter instance prevents socket tracking by Google
+      const transporter = createTransporter(email, appPassword);
       
-      // Dynamic spintax rendering
       const spunSubject = parseSpintax(subject);
       let spunBody = parseSpintax(messageBody);
 
-      // Add unique zero-width character noise to defeat content-hash duplication filters
-      const zeroWidthNoise = `\u200B\u200C\u200D`.repeat(Math.floor(Math.random() * 3) + 1);
-      spunBody += zeroWidthNoise;
+      // Random invisible noise tag
+      const invisibleTag = `<span style="display:none;font-size:0px;">${crypto.randomBytes(4).toString('hex')}</span>`;
+      spunBody = isHtml(spunBody) ? spunBody + invisibleTag : spunBody;
 
-      const isHtml = /<[a-z][\s\S]*>/i.test(spunBody);
+      const isHtmlBody = /<[a-z][\s\S]*>/i.test(spunBody);
 
-      // RFC Standard Headers for high deliverability
-      const msgIdDomain = senderEmail.split('@')[1] || 'gmail.com';
-      const uniqueMsgId = `<${crypto.randomUUID()}@${msgIdDomain}>`;
+      // Authenticated RFC Message-ID
+      const domainName = senderEmail.split('@')[1] || 'gmail.com';
+      const uniqueMsgId = `<${crypto.randomBytes(16).toString('hex')}@${domainName}>`;
 
       const mailOptions = {
         from: cleanSenderName ? `"${cleanSenderName}" <${senderEmail}>` : senderEmail,
@@ -206,13 +198,12 @@ app.post("/api/send-stream", async (req, res) => {
         date: new Date(),
         messageId: uniqueMsgId,
         headers: {
-          'X-Entity-Ref-ID': crypto.randomBytes(8).toString('hex'),
-          'X-Auto-Response-Suppress': 'OOF, AutoReply',
-          'Precedence': 'bulk'
+          'List-Unsubscribe': `<mailto:${senderEmail}?subject=unsubscribe>`,
+          'X-Report-Abuse-To': senderEmail
         }
       };
 
-      if (isHtml) {
+      if (isHtmlBody) {
         mailOptions.html = spunBody;
         mailOptions.text = convertHtmlToText(spunBody);
       } else {
@@ -227,7 +218,7 @@ app.post("/api/send-stream", async (req, res) => {
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // ORIGINAL SPEED PRESERVED: (0.6s to 1.2s delay)
+    // SPEED EXACTLY SAME: (0.6s to 1.2s delay)
     if (index < recipients.length - 1) {
       const randomDelay = Math.floor(600 + Math.random() * 600);
       const delayIntervals = Math.floor(randomDelay / 2000);
@@ -247,6 +238,10 @@ app.post("/api/send-stream", async (req, res) => {
   res.write("data: [DONE]\n\n");
   res.end();
 });
+
+function isHtml(text) {
+  return /<[a-z][\s\S]*>/i.test(text);
+}
 
 /* ==========================================================================
    STOP ROUTE
