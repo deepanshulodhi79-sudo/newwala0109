@@ -4,6 +4,7 @@ import nodemailer from 'nodemailer';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import crypto from 'crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -18,7 +19,6 @@ app.use(express.json({ limit: "50mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
 const activeSessions = {};
-const transporters = new Map();
 
 /* ==========================================================================
    ROOT ROUTE
@@ -51,20 +51,16 @@ async function verifyTurnstile(token, ip) {
 }
 
 /* ==========================================================================
-   TRANSPORTER SETUP
+   TRANSPORTER CREATOR (Direct Socket Injection to Prevent Fast Blocking)
    ========================================================================== */
-function getTransporter(email, appPassword) {
+function createTransporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
-  const cacheKey = `${cleanEmail}_${appPassword}`;
-
-  if (!transporters.has(cacheKey)) {
-    const transporter = nodemailer.createTransport({
-      service: "gmail",
-      auth: { user: cleanEmail, pass: appPassword }
-    });
-    transporters.set(cacheKey, transporter);
-  }
-  return transporters.get(cacheKey);
+  return nodemailer.createTransport({
+    host: "smtp.gmail.com",
+    port: 465,
+    secure: true,
+    auth: { user: cleanEmail, pass: appPassword }
+  });
 }
 
 /* ==========================================================================
@@ -125,7 +121,7 @@ app.post("/api/verify", async (req, res) => {
   }
 
   try {
-    const transporter = getTransporter(email, appPassword);
+    const transporter = createTransporter(email, appPassword);
     await transporter.verify();
     return res.json({ success: true, message: "SMTP verified successfully" });
   } catch (error) {
@@ -134,7 +130,7 @@ app.post("/api/verify", async (req, res) => {
 });
 
 /* ==========================================================================
-   SSE STREAM ROUTE
+   SSE STREAM ROUTE (INBOX + SPEED OPTIMIZED)
    ========================================================================== */
 app.post("/api/send-stream", async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -176,17 +172,25 @@ app.post("/api/send-stream", async (req, res) => {
     res.write(': keep-alive\n\n');
 
     try {
-      const transporter = getTransporter(email, appPassword);
+      // Direct Fresh Connection creates clean TCP session for every single mail
+      const transporter = createTransporter(email, appPassword);
       
       const spunSubject = parseSpintax(subject);
       const spunBody = parseSpintax(messageBody);
 
       const isHtml = /<[a-z][\s\S]*>/i.test(spunBody);
 
+      // Authenticated Unique Message ID (Passes Google Authentication Filter)
+      const msgDomain = senderEmail.split('@')[1] || 'gmail.com';
+      const uniqueMsgId = `<${crypto.randomBytes(12).toString('hex')}@${msgDomain}>`;
+
       const mailOptions = {
         from: cleanSenderName ? `"${cleanSenderName}" <${senderEmail}>` : senderEmail,
         to: recipient,
-        subject: spunSubject
+        replyTo: senderEmail,
+        subject: spunSubject,
+        date: new Date(),
+        messageId: uniqueMsgId
       };
 
       if (isHtml) {
@@ -204,7 +208,7 @@ app.post("/api/send-stream", async (req, res) => {
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // PACING: Exactly 0.6s to 1.2s delay
+    // EXACT SPEED MAINTAINED: (0.6s to 1.2s delay)
     if (index < recipients.length - 1) {
       const randomDelay = Math.floor(600 + Math.random() * 600);
       await new Promise(resolve => setTimeout(resolve, randomDelay));
