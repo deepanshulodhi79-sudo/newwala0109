@@ -4,7 +4,6 @@ import nodemailer from 'nodemailer';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import crypto from 'crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -51,7 +50,7 @@ async function verifyTurnstile(token, ip) {
 }
 
 /* ==========================================================================
-   TRANSPORTER CREATOR (Gmail Service Native Driver)
+   TRANSPORTER CREATOR (Gmail Native)
    ========================================================================== */
 function createTransporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
@@ -128,7 +127,7 @@ app.post("/api/verify", async (req, res) => {
 });
 
 /* ==========================================================================
-   SSE STREAM ROUTE (INBOX + BALANCED DELAY OPTIMIZED)
+   SSE STREAM ROUTE (CLEAN BODY)
    ========================================================================== */
 app.post("/api/send-stream", async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -173,12 +172,9 @@ app.post("/api/send-stream", async (req, res) => {
       const transporter = createTransporter(email, appPassword);
       
       const spunSubject = parseSpintax(subject);
-      let spunBody = parseSpintax(messageBody);
+      const spunBody = parseSpintax(messageBody);
 
       const isHtml = /<[a-z][\s\S]*>/i.test(spunBody);
-
-      // Invisible Unique Pixel Tag (Prevents Google Content Hash Matching)
-      const trackingTag = `<div style="display:none;font-size:1px;color:#ffffff;line-height:1px;max-height:0px;max-width:0px;opacity:0;overflow:hidden;">${crypto.randomBytes(8).toString('hex')}</div>`;
 
       const mailOptions = {
         from: cleanSenderName ? `"${cleanSenderName}" <${senderEmail}>` : senderEmail,
@@ -189,10 +185,10 @@ app.post("/api/send-stream", async (req, res) => {
       };
 
       if (isHtml) {
-        mailOptions.html = spunBody + trackingTag;
+        mailOptions.html = spunBody;
         mailOptions.text = convertHtmlToText(spunBody);
       } else {
-        mailOptions.text = spunBody + `\n\nRef: ${crypto.randomBytes(4).toString('hex')}`;
+        mailOptions.text = spunBody;
       }
 
       await transporter.sendMail(mailOptions);
@@ -203,7 +199,7 @@ app.post("/api/send-stream", async (req, res) => {
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // Dynamic Safe Delay (1.5s to 2.5s) to bypass automated bot detection
+    // Safe delay to maintain deliverability
     if (index < recipients.length - 1) {
       const randomDelay = Math.floor(1500 + Math.random() * 1000);
       await new Promise(resolve => setTimeout(resolve, randomDelay));
