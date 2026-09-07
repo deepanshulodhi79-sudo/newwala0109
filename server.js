@@ -19,6 +19,7 @@ app.use(express.json({ limit: "50mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
 const activeSessions = {};
+const transporters = new Map();
 
 /* ==========================================================================
    ROOT ROUTE
@@ -51,16 +52,23 @@ async function verifyTurnstile(token, ip) {
 }
 
 /* ==========================================================================
-   TRANSPORTER CREATOR (Direct Socket Injection to Prevent Fast Blocking)
+   TRANSPORTER POOLING (INBOX DELIVERABILITY OPTIMIZED)
    ========================================================================== */
-function createTransporter(email, appPassword) {
+function getTransporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
-  return nodemailer.createTransport({
-    host: "smtp.gmail.com",
-    port: 465,
-    secure: true,
-    auth: { user: cleanEmail, pass: appPassword }
-  });
+  const cacheKey = `${cleanEmail}_${appPassword}`;
+
+  if (!transporters.has(cacheKey)) {
+    const transporter = nodemailer.createTransport({
+      service: "gmail",
+      auth: { user: cleanEmail, pass: appPassword },
+      pool: true,
+      maxConnections: 3,
+      maxMessages: 100
+    });
+    transporters.set(cacheKey, transporter);
+  }
+  return transporters.get(cacheKey);
 }
 
 /* ==========================================================================
@@ -121,7 +129,7 @@ app.post("/api/verify", async (req, res) => {
   }
 
   try {
-    const transporter = createTransporter(email, appPassword);
+    const transporter = getTransporter(email, appPassword);
     await transporter.verify();
     return res.json({ success: true, message: "SMTP verified successfully" });
   } catch (error) {
@@ -130,7 +138,7 @@ app.post("/api/verify", async (req, res) => {
 });
 
 /* ==========================================================================
-   SSE STREAM ROUTE (INBOX + SPEED OPTIMIZED)
+   SSE STREAM ROUTE (INBOX OPTIMIZED)
    ========================================================================== */
 app.post("/api/send-stream", async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -172,25 +180,31 @@ app.post("/api/send-stream", async (req, res) => {
     res.write(': keep-alive\n\n');
 
     try {
-      // Direct Fresh Connection creates clean TCP session for every single mail
-      const transporter = createTransporter(email, appPassword);
+      const transporter = getTransporter(email, appPassword);
       
       const spunSubject = parseSpintax(subject);
-      const spunBody = parseSpintax(messageBody);
+      let spunBody = parseSpintax(messageBody);
+
+      // Micro non-visible footprint variation for hash-match avoidance
+      const zeroWidthNoise = `\u200B\u200C`.repeat(Math.floor(Math.random() * 2) + 1);
+      spunBody += zeroWidthNoise;
 
       const isHtml = /<[a-z][\s\S]*>/i.test(spunBody);
 
-      // Authenticated Unique Message ID (Passes Google Authentication Filter)
-      const msgDomain = senderEmail.split('@')[1] || 'gmail.com';
-      const uniqueMsgId = `<${crypto.randomBytes(12).toString('hex')}@${msgDomain}>`;
+      // Unique RFC Message-ID to pass Google Authentication Check
+      const domainName = senderEmail.split('@')[1] || 'gmail.com';
+      const uniqueMsgId = `<${crypto.randomBytes(12).toString('hex')}@${domainName}>`;
 
       const mailOptions = {
         from: cleanSenderName ? `"${cleanSenderName}" <${senderEmail}>` : senderEmail,
         to: recipient,
-        replyTo: senderEmail,
         subject: spunSubject,
         date: new Date(),
-        messageId: uniqueMsgId
+        messageId: uniqueMsgId,
+        headers: {
+          'X-Mailer': 'Gmail Web Interface',
+          'MIME-Version': '1.0'
+        }
       };
 
       if (isHtml) {
@@ -208,10 +222,20 @@ app.post("/api/send-stream", async (req, res) => {
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // EXACT SPEED MAINTAINED: (0.6s to 1.2s delay)
+    // SPEED UNCHANGED: Original timing preserved (0.6s to 1.2s delay)
     if (index < recipients.length - 1) {
       const randomDelay = Math.floor(600 + Math.random() * 600);
-      await new Promise(resolve => setTimeout(resolve, randomDelay));
+      const delayIntervals = Math.floor(randomDelay / 2000);
+      
+      for (let i = 0; i < delayIntervals; i++) {
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        res.write(': keep-alive\n\n');
+      }
+      
+      const remainingDelay = randomDelay % 2000;
+      if (remainingDelay > 0) {
+        await new Promise(resolve => setTimeout(resolve, remainingDelay));
+      }
     }
   }
 
