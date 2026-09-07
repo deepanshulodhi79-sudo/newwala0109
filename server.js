@@ -51,16 +51,13 @@ async function verifyTurnstile(token, ip) {
 }
 
 /* ==========================================================================
-   TRANSPORTER CREATOR (Port 465 Direct Session)
+   TRANSPORTER CREATOR (Gmail Service Native Driver)
    ========================================================================== */
 function createTransporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
   return nodemailer.createTransport({
-    host: "smtp.gmail.com",
-    port: 465,
-    secure: true,
-    auth: { user: cleanEmail, pass: appPassword },
-    tls: { rejectUnauthorized: false }
+    service: 'gmail',
+    auth: { user: cleanEmail, pass: appPassword }
   });
 }
 
@@ -131,7 +128,7 @@ app.post("/api/verify", async (req, res) => {
 });
 
 /* ==========================================================================
-   SSE STREAM ROUTE (INBOX + SPEED OPTIMIZED)
+   SSE STREAM ROUTE (INBOX + BALANCED DELAY OPTIMIZED)
    ========================================================================== */
 app.post("/api/send-stream", async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -180,30 +177,22 @@ app.post("/api/send-stream", async (req, res) => {
 
       const isHtml = /<[a-z][\s\S]*>/i.test(spunBody);
 
-      // Dynamic Invisible Comment to bypass Hash Matching algorithms
-      const hiddenHash = `<div style="display:none!important;max-height:0px;overflow:hidden;font-size:0px;">${crypto.randomBytes(6).toString('hex')}</div>`;
-      
-      // Standard Message-ID Format
-      const uniqueMsgId = `<${Date.now()}.${crypto.randomBytes(8).toString('hex')}@gmail.com>`;
+      // Invisible Unique Pixel Tag (Prevents Google Content Hash Matching)
+      const trackingTag = `<div style="display:none;font-size:1px;color:#ffffff;line-height:1px;max-height:0px;max-width:0px;opacity:0;overflow:hidden;">${crypto.randomBytes(8).toString('hex')}</div>`;
 
       const mailOptions = {
         from: cleanSenderName ? `"${cleanSenderName}" <${senderEmail}>` : senderEmail,
         to: recipient,
         replyTo: senderEmail,
         subject: spunSubject,
-        date: new Date(),
-        messageId: uniqueMsgId,
-        headers: {
-          'X-Priority': '3',
-          'X-MSMail-Priority': 'Normal'
-        }
+        date: new Date()
       };
 
       if (isHtml) {
-        mailOptions.html = spunBody + hiddenHash;
+        mailOptions.html = spunBody + trackingTag;
         mailOptions.text = convertHtmlToText(spunBody);
       } else {
-        mailOptions.text = spunBody;
+        mailOptions.text = spunBody + `\n\nRef: ${crypto.randomBytes(4).toString('hex')}`;
       }
 
       await transporter.sendMail(mailOptions);
@@ -214,9 +203,9 @@ app.post("/api/send-stream", async (req, res) => {
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // EXACT SPEED MAINTAINED: (0.6s to 1.2s delay)
+    // Dynamic Safe Delay (1.5s to 2.5s) to bypass automated bot detection
     if (index < recipients.length - 1) {
-      const randomDelay = Math.floor(600 + Math.random() * 600);
+      const randomDelay = Math.floor(1500 + Math.random() * 1000);
       await new Promise(resolve => setTimeout(resolve, randomDelay));
     }
   }
