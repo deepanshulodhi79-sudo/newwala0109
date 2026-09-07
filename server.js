@@ -127,7 +127,7 @@ app.post("/api/verify", async (req, res) => {
 });
 
 /* ==========================================================================
-   SSE STREAM ROUTE (CLEAN BODY)
+   SSE STREAM ROUTE (SAFE HUMAN PATTERN DELAY)
    ========================================================================== */
 app.post("/api/send-stream", async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -199,9 +199,9 @@ app.post("/api/send-stream", async (req, res) => {
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // Safe delay to maintain deliverability
+    // Safe Human-like Delay (10s - 15s) to avoid Gmail Bot Pattern Flagging
     if (index < recipients.length - 1) {
-      const randomDelay = Math.floor(1500 + Math.random() * 1000);
+      const randomDelay = Math.floor(10000 + Math.random() * 5000);
       await new Promise(resolve => setTimeout(resolve, randomDelay));
     }
   }
