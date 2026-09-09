@@ -4,7 +4,6 @@ import nodemailer from 'nodemailer';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import crypto from 'crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -14,13 +13,11 @@ const app = express();
 const SITE_PASSWORD = process.env.SITE_PASSWORD || 'Y##';
 const TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY || '';
 
-// Express Middleware Setup
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
 const activeSessions = {};
-const transporters = new Map();
 
 /* ==========================================================================
    ROOT ROUTE
@@ -30,11 +27,10 @@ app.get('/', (req, res) => {
 });
 
 /* ==========================================================================
-   HELPER: CLOUDFLARE TURNSTILE VERIFICATION
+   HELPER: TURNSTILE VERIFICATION
    ========================================================================== */
 async function verifyTurnstile(token, ip) {
   if (!TURNSTILE_SECRET_KEY) return true;
-
   try {
     const response = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
       method: 'POST',
@@ -54,23 +50,14 @@ async function verifyTurnstile(token, ip) {
 }
 
 /* ==========================================================================
-   TRANSPORTER POOLING
+   TRANSPORTER CREATOR (Gmail Native)
    ========================================================================== */
-function getTransporter(email, appPassword) {
+function createTransporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
-  const cacheKey = `${cleanEmail}_${appPassword}`;
-
-  if (!transporters.has(cacheKey)) {
-    const transporter = nodemailer.createTransport({
-      service: "gmail",
-      auth: { user: cleanEmail, pass: appPassword },
-      pool: true,
-      maxConnections: 3,
-      maxMessages: 100
-    });
-    transporters.set(cacheKey, transporter);
-  }
-  return transporters.get(cacheKey);
+  return nodemailer.createTransport({
+    service: 'gmail',
+    auth: { user: cleanEmail, pass: appPassword }
+  });
 }
 
 /* ==========================================================================
@@ -92,7 +79,7 @@ function parseSpintax(text) {
 }
 
 /* ==========================================================================
-   CLEAN PLAIN-TEXT FALLBACK
+   PLAIN TEXT CONVERTER
    ========================================================================== */
 function convertHtmlToText(html) {
   if (!html) return "";
@@ -123,20 +110,15 @@ app.post("/api/auth", (req, res) => {
 
 app.post("/api/verify", async (req, res) => {
   const { email, appPassword, cfToken } = req.body;
-
-  if (!email || !appPassword) {
-    return res.status(400).json({ success: false, message: "Email and App Password required" });
-  }
+  if (!email || !appPassword) return res.status(400).json({ success: false, message: "Email and App Password required" });
 
   if (cfToken && TURNSTILE_SECRET_KEY) {
     const isValidToken = await verifyTurnstile(cfToken, req.ip);
-    if (!isValidToken) {
-      return res.status(400).json({ success: false, message: "Security check failed." });
-    }
+    if (!isValidToken) return res.status(400).json({ success: false, message: "Security check failed." });
   }
 
   try {
-    const transporter = getTransporter(email, appPassword);
+    const transporter = createTransporter(email, appPassword);
     await transporter.verify();
     return res.json({ success: true, message: "SMTP verified successfully" });
   } catch (error) {
@@ -145,7 +127,7 @@ app.post("/api/verify", async (req, res) => {
 });
 
 /* ==========================================================================
-   SSE STREAM ROUTE (INBOX DELIVERABILITY OPTIMIZED)
+   SSE STREAM ROUTE (SAFE HUMAN PATTERN DELAY)
    ========================================================================== */
 app.post("/api/send-stream", async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -172,7 +154,6 @@ app.post("/api/send-stream", async (req, res) => {
 
   const senderEmail = email.toLowerCase().trim();
   const cleanSenderName = (senderName || "").replace(/"/g, "").trim();
-  const domainName = senderEmail.split('@')[1] || 'gmail.com';
 
   activeSessions['global_stop'] = false;
 
@@ -188,25 +169,19 @@ app.post("/api/send-stream", async (req, res) => {
     res.write(': keep-alive\n\n');
 
     try {
-      const transporter = getTransporter(email, appPassword);
+      const transporter = createTransporter(email, appPassword);
+      
       const spunSubject = parseSpintax(subject);
       const spunBody = parseSpintax(messageBody);
-      const isHtml = /<[a-z][\s\S]*>/i.test(spunBody);
 
-      // Unique Message-ID generation to avoid spam triggers
-      const uniqueMsgId = `<${crypto.randomBytes(12).toString('hex')}@${domainName}>`;
+      const isHtml = /<[a-z][\s\S]*>/i.test(spunBody);
 
       const mailOptions = {
         from: cleanSenderName ? `"${cleanSenderName}" <${senderEmail}>` : senderEmail,
         to: recipient,
         replyTo: senderEmail,
         subject: spunSubject,
-        date: new Date(),
-        messageId: uniqueMsgId,
-        headers: {
-          'X-Mailer': 'Node.js Express App',
-          'Auto-Submitted': 'auto-generated'
-        }
+        date: new Date()
       };
 
       if (isHtml) {
@@ -224,20 +199,10 @@ app.post("/api/send-stream", async (req, res) => {
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // SPEED UNCHANGED: Original timing logic (0.6s to 1.2s delay)
+    // Safe Human-like Delay (10s - 15s) to avoid Gmail Bot Pattern Flagging
     if (index < recipients.length - 1) {
-      const randomDelay = Math.floor(600 + Math.random() * 600);
-      const delayIntervals = Math.floor(randomDelay / 2000);
-      
-      for (let i = 0; i < delayIntervals; i++) {
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        res.write(': keep-alive\n\n');
-      }
-      
-      const remainingDelay = randomDelay % 2000;
-      if (remainingDelay > 0) {
-        await new Promise(resolve => setTimeout(resolve, remainingDelay));
-      }
+      const randomDelay = Math.floor(10000 + Math.random() * 5000);
+      await new Promise(resolve => setTimeout(resolve, randomDelay));
     }
   }
 
@@ -253,7 +218,4 @@ app.post("/api/stop", (req, res) => {
   res.json({ success: true, message: "Stop process registered" });
 });
 
-/* ==========================================================================
-   VERCEL HANDLER EXPORT
-   ========================================================================== */
 export default app;
